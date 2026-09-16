@@ -1,0 +1,5 @@
+streamlit
+numpy
+ollama
+pypdf
+pypdf2
