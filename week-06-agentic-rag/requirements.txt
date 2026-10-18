@@ -1,0 +1,5 @@
+streamlit
+numpy
+ollama
+pypdf2
+sentence-transformers
