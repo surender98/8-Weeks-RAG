@@ -1,6 +1,7 @@
-duckduckgo-search
-pypdf
-streamlit
+fastapi
+uvicorn
+pypdf2
+numpy
 ollama
 numpy
 ddgs

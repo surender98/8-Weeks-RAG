@@ -1,5 +1,6 @@
+duckduckgo-search
+pypdf
 streamlit
-numpy
 ollama
-pypdf2
-sentence-transformers
+numpy
+ddgs
