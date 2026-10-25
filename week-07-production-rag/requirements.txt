@@ -1,0 +1,6 @@
+duckduckgo-search
+pypdf
+streamlit
+ollama
+numpy
+ddgs
