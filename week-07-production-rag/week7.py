@@ -1,3 +1,145 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import ollama
+import uvicorn
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    from PyPDF2 import PdfReader
+
+
+DEFAULT_LLM = os.getenv("RAG_LLM", "llama3.2")
+DEFAULT_EMBED_MODEL = os.getenv("RAG_EMBED", "nomic-embed-text")
+TOP_K = 3
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 100
+
+CACHE_THRESHOLD = 0.85
+CACHE_MAX_SIZE = 500
+CACHE_TTL_SECONDS = 3600
+CACHE_NEAR_MISS_MARGIN = 0.05
+
+MAX_CONTEXT_CHARS = 8000
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+_client: Optional[ollama.AsyncClient] = None
+
+
+def get_client() -> ollama.AsyncClient:
+    global _client
+    if _client is None:
+        _client = ollama.AsyncClient()
+    return _client
+
+
+async def list_models() -> List[str]:
+    try:
+        resp = await get_client().list()
+        models = _get(resp, "models", []) or []
+        return sorted(n for m in models if (n := _get(m, "model") or _get(m, "name")))
+    except Exception:
+        return []
+
+
+async def get_embedding(text: str, model: str = DEFAULT_EMBED_MODEL) -> List[float]:
+    resp = await get_client().embeddings(model=model, prompt=text)
+    vec = _get(resp, "embedding", []) or []
+    return [float(x) for x in vec]
+
+
+def chunk_text(
+    text: str,
+    source: str,
+    chunk_size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> List[Dict[str, Any]]:
+    text = text.strip()
+    if not text:
+        return []
+    step = max(1, chunk_size - overlap)
+    n = len(text)
+    chunks: List[Dict[str, Any]] = []
+    start = 0
+    cid = 0
+    while start < n:
+        end = min(start + chunk_size, n)
+        if end < n:
+            window = text[start:end]
+            for sep in ("\n\n", ". ", "! ", "? ", "\n", " "):
+                idx = window.rfind(sep)
+                if idx > chunk_size * 0.5:
+                    end = start + idx + len(sep)
+                    break
+        piece = text[start:end].strip()
+        if piece:
+            chunks.append({"chunk_id": f"{source}::{cid}", "source": source, "text": piece})
+            cid += 1
+        if end >= n:
+            break
+        start += step
+    return chunks
+
+
+class VectorStore:
+    def __init__(self) -> None:
+        self.chunks: List[Dict[str, Any]] = []
+        self._matrix: Optional[np.ndarray] = None
+        self._dirty = True
+
+    def add(self, chunks: List[Dict[str, Any]], vectors: List[List[float]]) -> None:
+        for chunk, vec in zip(chunks, vectors):
+            chunk["vector"] = np.asarray(vec, dtype=np.float32)
+            self.chunks.append(chunk)
+        self._dirty = True
+
+    def _build(self) -> None:
+        if not self._dirty:
+            return
+        if not self.chunks:
+            self._matrix = None
+            self._dirty = False
+            return
+        mat = np.vstack([c["vector"] for c in self.chunks])
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-10
+        self._matrix = mat / norms
+        self._dirty = False
+
+    def retrieve(self, query_vec: List[float], top_k: int = TOP_K) -> List[Tuple[Dict[str, Any], float]]:
+        self._build()
+        if self._matrix is None:
+            return []
+        q = np.asarray(query_vec, dtype=np.float32)
+        q = q / (np.linalg.norm(q) + 1e-10)
+        sims = self._matrix @ q
+        k = min(top_k, len(self.chunks))
+        idx = np.argpartition(-sims, k - 1)[:k]
+        idx = idx[np.argsort(-sims[idx])]
+        return [(self.chunks[i], float(sims[i])) for i in idx]
+
+    def clear(self) -> None:
+        self.chunks = []
+        self._matrix = None
+        self._dirty = True
 
     @property
     def size(self) -> int:

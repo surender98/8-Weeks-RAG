@@ -718,3 +718,181 @@ if process_clicked:
             st.session_state.last_result = None
             st.success(f"Indexed {len(all_chunks)} chunks from {len(indexed_names)} documents.")
 
+
+has_index = len(st.session_state.vector_store.records) > 0
+
+if has_index:
+    st.markdown("#### Strategy")
+    strategy_cols = st.columns(3)
+    selected_strategy = st.session_state.get("strategy_choice", "standard")
+
+    for col, (key, name, desc) in zip(strategy_cols, STRATEGIES):
+        with col:
+            active = "active" if key == selected_strategy and not compare_mode else ""
+            st.markdown(
+                f"""
+                <div class="strategy-card {active}">
+                    <div class="strategy-step">Strategy</div>
+                    <div class="strategy-name">{name}</div>
+                    <div class="strategy-desc">{desc}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    if not compare_mode:
+        selected_strategy = st.radio(
+            "Select strategy",
+            [k for k, _, _ in STRATEGIES],
+            format_func=lambda k: next(n for kk, n, _ in STRATEGIES if kk == k),
+            horizontal=True,
+            label_visibility="collapsed",
+            key="strategy_choice",
+        )
+
+    st.markdown("#### Query")
+    query = st.text_input(
+        "Ask a vague or conversational question",
+        placeholder="e.g. How does the company help with remote work?",
+        label_visibility="collapsed",
+    )
+
+    if st.button("Run", type="primary") and query:
+        results_by_strategy: Dict[str, Dict[str, Any]] = {}
+        strategies_to_run = (
+            [k for k, _, _ in STRATEGIES] if compare_mode else [selected_strategy]
+        )
+
+        for key in strategies_to_run:
+            with st.spinner(f"Running {key}..."):
+                try:
+                    if key == "standard":
+                        results, meta = retrieve_standard(
+                            st.session_state.vector_store, query, embed_model
+                        )
+                    elif key == "multi_query":
+                        results, meta = retrieve_multi_query(
+                            st.session_state.vector_store, query, embed_model, llm_model
+                        )
+                    else:
+                        results, meta = retrieve_hyde(
+                            st.session_state.vector_store, query, embed_model, llm_model
+                        )
+                    results_by_strategy[key] = {"results": results, "meta": meta}
+                except Exception as exc:
+                    st.error(f"{key} failed: {exc}")
+
+        st.session_state.last_result = {
+            "query": query,
+            "by_strategy": results_by_strategy,
+            "compare": compare_mode,
+        }
+
+    if st.session_state.last_result:
+        payload = st.session_state.last_result
+        by_strategy = payload["by_strategy"]
+
+        if payload["compare"]:
+            cols = st.columns(len(by_strategy))
+            for col, (key, data) in zip(cols, by_strategy.items()):
+                name = next(n for kk, n, _ in STRATEGIES if kk == key)
+                with col:
+                    st.markdown(f"##### {name}")
+                    meta = data["meta"]
+                    if meta.get("hyde"):
+                        st.markdown("**HyDE document**")
+                        st.markdown(
+                            f"<div class='hyde-block'>{meta['hyde']}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    if key == "multi_query":
+                        chips = "".join(
+                            f"<span class='query-chip{' original' if i == 0 else ''}'>{q}</span>"
+                            for i, q in enumerate(meta["queries"])
+                        )
+                        st.markdown("**Generated queries**")
+                        st.markdown(chips, unsafe_allow_html=True)
+                    st.markdown("**Top chunks**")
+                    for chunk, score in data["results"]:
+                        st.markdown(
+                            f"""
+                            <div class="source-card">
+                                <div class="source-head">
+                                    <div class="source-title">{chunk['chunk_id']}</div>
+                                    <div class="source-score">{score:.3f}</div>
+                                </div>
+                                <div class="source-body">{chunk['text'][:220]}{'…' if len(chunk['text']) > 220 else ''}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+        else:
+            key = next(iter(by_strategy.keys()))
+            data = by_strategy[key]
+            meta = data["meta"]
+
+            if meta.get("hyde"):
+                st.markdown("**HyDE document**")
+                st.markdown(
+                    f"<div class='hyde-block'>{meta['hyde']}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            if key == "multi_query":
+                chips = "".join(
+                    f"<span class='query-chip{' original' if i == 0 else ''}'>{q}</span>"
+                    for i, q in enumerate(meta["queries"])
+                )
+                st.markdown("**Generated queries**")
+                st.markdown(chips, unsafe_allow_html=True)
+
+            context_str = build_context(data["results"])
+
+            placeholder = st.empty()
+            answer = ""
+            try:
+                for token in stream_answer(query=payload["query"], context=context_str, model=llm_model):
+                    answer += token
+                    placeholder.markdown(answer + "▌")
+                placeholder.markdown(answer or "_No response._")
+            except Exception as exc:
+                placeholder.empty()
+                st.error(f"Generation failed: {exc}")
+
+            st.markdown(
+                f"""
+                <div class="answer-card">
+                    <div class="answer-label">Answer</div>
+                    <div class="answer-body">{answer}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            ) if answer else None
+
+            with st.expander("Retrieved Context", expanded=False):
+                for chunk, score in data["results"]:
+                    st.markdown(
+                        f"""
+                        <div class="source-card">
+                            <div class="source-head">
+                                <div class="source-title">{chunk['chunk_id']}</div>
+                                <div class="source-score">{score:.3f}</div>
+                            </div>
+                            <div class="source-body">{chunk['text'][:700]}{'…' if len(chunk['text']) > 700 else ''}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+else:
+    st.markdown(
+        """
+        <div class="empty-state">
+            <div class="empty-title">No documents indexed</div>
+            <div class="empty-body">
+                Upload one or more PDFs from the sidebar, then click Process Documents to begin.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )

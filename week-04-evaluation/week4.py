@@ -428,3 +428,42 @@ def run_evaluation_suite(generator_model: str, judge_model: str) -> Dict[str, An
                 "n/a" if result.relevance is None
                 else ("relevant" if result.relevance else "irrelevant")
             )
+
+            print(f"    retrieved : {result.retrieved_ids}")
+            print(f"    answer    : {result.answer[:110]}")
+            print(f"    hit       : {hit_label}")
+            print(f"    faithful  : {faith_label}")
+            print(f"    relevance : {rel_label}")
+            print(
+                f"    latency   : gen {result.generation_latency:.2f}s | "
+                f"judge {result.judge_latency:.2f}s"
+            )
+
+        print()
+        time.sleep(SLEEP_BETWEEN_TESTS)
+
+    return summarize(results, generator_model, judge_model)
+
+
+def main() -> int:
+    generator_model, judge_model = resolve_models()
+
+    try:
+        summary = run_evaluation_suite(generator_model, judge_model)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        return 130
+    except Exception as exc:
+        print(f"Evaluation failed: {exc}")
+        return 1
+
+    print_report(summary)
+
+    path = save_results(summary)
+    print(f"Results written to {path.resolve()}")
+
+    return 0 if summary["passed"] else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

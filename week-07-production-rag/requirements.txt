@@ -3,5 +3,3 @@ uvicorn
 pypdf2
 numpy
 ollama
-numpy
-ddgs
